@@ -1367,13 +1367,15 @@ function PlayPageClient() {
   // 换源加载状态
   const [isVideoLoading, setIsVideoLoading] = useState(true);
   const [videoLoadingStage, setVideoLoadingStage] = useState<
-    'initing' | 'sourceChanging'
+    'initing' | 'sourceChanging' | 'episodeChanging'
   >('initing');
   const [videoError, setVideoError] = useState<string | null>(null);
   // 直链播放时 CORS 失败的原始 URL，用于显示"使用代理播放"按钮
   const [corsFailedUrl, setCorsFailedUrl] = useState<string | null>(null);
   // 标记当前视频是否已经尝试过代理（防止 415→直连→失败→代理 的无限循环）
   const proxyAttemptedRef = useRef(false);
+  const videoUrlRequestSeqRef = useRef(0);
+  const lastVideoRequestKeyRef = useRef<string | null>(null);
 
   // 直链代理域名记忆：检查某个域名是否需要代理
   const isDirectplayDomainProxied = (url: string): boolean => {
@@ -2124,11 +2126,39 @@ function PlayPageClient() {
       return;
     }
 
+    const requestKey = `${detailData.source}|${detailData.id}|${episodeIndex}`;
+    const isEpisodeSwitchRequest = lastVideoRequestKeyRef.current !== requestKey;
+    lastVideoRequestKeyRef.current = requestKey;
+    const requestSeq = ++videoUrlRequestSeqRef.current;
+
     let newUrl = detailData?.episodes[episodeIndex] || '';
+    const isXiaoyaLazyPlayUrl = newUrl.startsWith('/api/xiaoya/play');
+
+    if (isEpisodeSwitchRequest && isXiaoyaLazyPlayUrl) {
+      setVideoLoadingStage('episodeChanging');
+      setIsVideoLoading(true);
+      setVideoError(null);
+      setCorsFailedUrl(null);
+
+      if (artPlayerRef.current?.video) {
+        try {
+          const video = artPlayerRef.current.video as HTMLVideoElement;
+          video.pause();
+          video.removeAttribute('src');
+          video.load();
+        } catch (error) {
+          console.warn('切集时清空旧视频源失败:', error);
+        }
+      }
+
+      if (videoUrl) {
+        setVideoUrl('');
+      }
+    }
 
     // 如果是小雅或 openlist 接口，先请求获取真实 URL
     const isSpecialLazyPlayUrl =
-      newUrl.startsWith('/api/xiaoya/play') ||
+      isXiaoyaLazyPlayUrl ||
       newUrl.startsWith('/api/openlist/play') ||
       newUrl.startsWith('/api/source-script/play');
 
@@ -2145,6 +2175,9 @@ function PlayPageClient() {
 
         const response = await fetch(fetchUrl);
         const data = await response.json();
+        if (requestSeq !== videoUrlRequestSeqRef.current) {
+          return;
+        }
         if (data.url) {
           newUrl = data.url;
           // 保存清晰度列表
@@ -2155,6 +2188,9 @@ function PlayPageClient() {
           }
         }
       } catch (error) {
+        if (requestSeq !== videoUrlRequestSeqRef.current) {
+          return;
+        }
         console.error('获取播放链接失败:', error);
         setVideoQualities([]);
         currentXiaoyaUrlRef.current = ''; // 获取失败，清空
@@ -2172,6 +2208,9 @@ function PlayPageClient() {
       currentId || undefined,
       episodeIndex
     );
+    if (requestSeq !== videoUrlRequestSeqRef.current) {
+      return;
+    }
 
     if (fileSystemCheck.hasLocal && fileSystemCheck.dirHandle) {
       // 使用本地文件播放
@@ -2242,6 +2281,9 @@ function PlayPageClient() {
     // 如果没有 File System API 本地文件，检查服务器端本地下载
     if (!fileSystemCheck.hasLocal) {
       const hasLocalFile = await checkLocalDownload(currentSource, currentId, episodeIndex);
+      if (requestSeq !== videoUrlRequestSeqRef.current) {
+        return;
+      }
 
       if (hasLocalFile) {
         // 使用本地代理接口,URL以.m3u8结尾以便Artplayer自动识别
@@ -2269,7 +2311,10 @@ function PlayPageClient() {
       }
     }
 
-    if (newUrl !== videoUrl) {
+    if (isEpisodeSwitchRequest || newUrl !== videoUrl) {
+      if (requestSeq !== videoUrlRequestSeqRef.current) {
+        return;
+      }
       setVideoUrl(newUrl);
     }
   };
@@ -3934,6 +3979,9 @@ function PlayPageClient() {
       if (artPlayerRef.current && artPlayerRef.current.paused) {
         saveCurrentPlayProgress();
       }
+      setVideoLoadingStage('episodeChanging');
+      setIsVideoLoading(true);
+      setVideoError(null);
       setCurrentEpisodeIndex(episodeNumber);
     }
   };
@@ -3945,6 +3993,9 @@ function PlayPageClient() {
       if (artPlayerRef.current && !artPlayerRef.current.paused) {
         saveCurrentPlayProgress();
       }
+      setVideoLoadingStage('episodeChanging');
+      setIsVideoLoading(true);
+      setVideoError(null);
       setCurrentEpisodeIndex(idx - 1);
     }
   };
@@ -3993,6 +4044,9 @@ function PlayPageClient() {
       const isFiltered = episodeTitle && isEpisodeFilteredByTitle(episodeTitle);
 
       if (!isFiltered) {
+        setVideoLoadingStage('episodeChanging');
+        setIsVideoLoading(true);
+        setVideoError(null);
         setCurrentEpisodeIndex(nextIdx);
         return;
       }
